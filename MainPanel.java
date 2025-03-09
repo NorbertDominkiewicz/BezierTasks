@@ -46,9 +46,8 @@ class DrawingPanel extends JPanel {
         setBackground(Color.WHITE);
         setLayout(null);
         setBorder(BorderFactory.createLineBorder(Color.black, 2, true));
-        setFocusable(true); // Ustaw panel jako focusowalny
-        addKeyListener(klawiatura); // Dodaj KeyListener do panelu
-
+        setFocusable(true);
+        addKeyListener(klawiatura);
         addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
