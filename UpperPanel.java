@@ -94,6 +94,7 @@ public class UpperPanel extends JPanel {
     Button formulas;
     AddCurve dodajKrzywa;
     Button rysujInicjaly;
+    Button dodaj3DSurface;
     UpperPanel(Gui mainFrame) {
         setOpaque(true);
         setBackground(new Color(25, 25, 25));
@@ -125,6 +126,17 @@ public class UpperPanel extends JPanel {
         zmienKolor.addActionListener(e->{
            new ChangeColor();
         });
+        dodaj3DSurface = new Button("Dodaj 3D przestrzeń");
+        dodaj3DSurface.addActionListener(e->{
+            mainFrame.tresc.dp.curves.clear();
+            mainFrame.tresc.dp.points.clear();
+            mainFrame.tresc.dp.removeAll();
+            mainFrame.tresc.dp.setDrawable(false);
+            mainFrame.tresc.dp.clickCount = 0;
+            mainFrame.tresc.dp.repaint();
+            mainFrame.tresc.dp.revalidate();
+            mainFrame.tresc.dp.drawSurface();
+        });
         dodajKrzywa = new AddCurve(mainFrame);
         add(autor);
         GridBagConstraints c = new GridBagConstraints();
@@ -145,5 +157,7 @@ public class UpperPanel extends JPanel {
         add(rysujInicjaly,c);
         c.gridx++;
         add(formulas,c);
+        c.gridx++;
+        add(dodaj3DSurface,c);
     }
 }

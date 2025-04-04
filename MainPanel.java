@@ -5,16 +5,32 @@ import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
+
+import com.sun.j3d.utils.behaviors.mouse.MouseRotate;
+import com.sun.j3d.utils.behaviors.mouse.MouseTranslate;
+import com.sun.j3d.utils.behaviors.mouse.MouseZoom;
+import com.sun.j3d.utils.universe.SimpleUniverse;
+import javax.media.j3d.*;
+import javax.vecmath.*;
 import java.util.ArrayList;
+import java.util.List;
+
 
 class DrawingPanel extends JPanel {
     private int indexButton = 0;
     private boolean drawable = false;
     public int clickCount = 0;
+    private static final int PATCH_SIZE = 16;
+    private List<float[]> patches = new ArrayList<>();
     public ArrayList<PointButton> points;
     public ArrayList<ArrayList<PointButton>> curves;
     public Color drawingColor = Color.BLACK;
     public PointButton selectedPoint;
+    public String filename;
+    Canvas3D bezierSurface;
     MainPanel mainPanel;
     KeyAdapter klawiatura = new KeyAdapter() {
         public void keyPressed(KeyEvent e) {
@@ -131,6 +147,33 @@ class DrawingPanel extends JPanel {
         }
     }
 
+    public void drawSurface() {
+        if (bezierSurface != null) {
+            remove(bezierSurface);
+        }
+
+        GraphicsConfiguration config = SimpleUniverse.getPreferredConfiguration();
+        bezierSurface = new Canvas3D(config);
+        bezierSurface.setDoubleBufferEnable(true);
+
+        setLayout(new BorderLayout());
+        add(bezierSurface, BorderLayout.CENTER);
+        revalidate();
+        repaint();
+
+        SimpleUniverse universe = new SimpleUniverse(bezierSurface);
+        universe.getViewingPlatform().setNominalViewingTransform();
+
+        Background background = new Background(new Color3f(0.8f, 0.8f, 0.8f));
+        background.setApplicationBounds(new BoundingSphere(new Point3d(0.0, 0.0, 0.0), 1000.0));
+
+        BranchGroup scene = createScene();
+        scene.addChild(background);
+        universe.addBranchGraph(scene);
+
+        setIgnoreRepaint(true);
+    }
+
     public void drawAuthorCurve() {
         ArrayList<PointButton> allPoints = new ArrayList<>();
 
@@ -171,7 +214,251 @@ class DrawingPanel extends JPanel {
         }
         repaint();
     }
+
+    private float[] evaluateBezier(float[] patch, float u, float v) {
+        float[] point = new float[3];
+
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 4; j++) {
+                float basisU = bernsteinBasis(i, 3, u);
+                float basisV = bernsteinBasis(j, 3, v);
+
+                int index = (i * 4 + j) * 3;
+                point[0] += patch[index] * basisU * basisV;
+                point[1] += patch[index + 1] * basisU * basisV;
+                point[2] += patch[index + 2] * basisU * basisV;
+            }
+        }
+
+        return point;
+    }
+
+    private float bernsteinBasis(int i, int n, float t) {
+        return binomialCoefficient(n, i) * (float) Math.pow(t, i) * (float) Math.pow(1 - t, n - i);
+    }
+
+    private int binomialCoefficient(int n, int k) {
+        if (k < 0 || k > n) return 0;
+        if (k == 0 || k == n) return 1;
+        k = Math.min(k, n - k);
+        int result = 1;
+        for (int i = 1; i <= k; i++) {
+            result = result * (n - k + i) / i;
+        }
+        return result;
+    }
+
+    private void loadPatches(String fileName) throws IOException {
+        try (BufferedReader reader = new BufferedReader(new FileReader(fileName))) {
+            String line;
+            float[] currentPatch = new float[PATCH_SIZE * 3];
+            int patchIndex = 0;
+
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty()) continue;
+
+                if (line.matches("\\d+\\s+\\d+")) {
+                    if (patchIndex > 0) {
+                        patches.add(currentPatch);
+                    }
+                    currentPatch = new float[PATCH_SIZE * 3];
+                    patchIndex = 0;
+                } else {
+                    String[] values = line.split("\\s+");
+                    if (values.length == 3) {
+                        currentPatch[patchIndex++] = Float.parseFloat(values[0]);
+                        currentPatch[patchIndex++] = Float.parseFloat(values[1]);
+                        currentPatch[patchIndex++] = Float.parseFloat(values[2]);
+                    }
+                }
+            }
+            if (patchIndex > 0) {
+                patches.add(currentPatch);
+            }
+        }
+    }
+
+    private BranchGroup createScene() {
+        BranchGroup root = new BranchGroup();
+        root.setCapability(BranchGroup.ALLOW_CHILDREN_EXTEND);
+
+        try {
+            loadPatches("src/coordinates.txt");
+            Shape3D teapotShape = createColoredTeapot();
+
+            Transform3D scale = new Transform3D();
+            scale.setScale(0.1);
+
+            Transform3D rotate = new Transform3D();
+            rotate.rotX(Math.toRadians(-90));
+
+            Transform3D initialTransform = new Transform3D();
+            initialTransform.mul(scale);
+            initialTransform.mul(rotate);
+
+            TransformGroup mouseTG = new TransformGroup();
+            mouseTG.setCapability(TransformGroup.ALLOW_TRANSFORM_WRITE);
+            mouseTG.setCapability(TransformGroup.ALLOW_TRANSFORM_READ);
+
+            TransformGroup objTG = new TransformGroup(initialTransform);
+            objTG.addChild(teapotShape);
+            mouseTG.addChild(objTG);
+
+            setupMouseBehaviors(mouseTG);
+
+            root.addChild(mouseTG);
+            root.addChild(createEnhancedLighting());
+
+        } catch (IOException e) {
+            e.printStackTrace();
+            JOptionPane.showMessageDialog(this, "Błąd ładowania pliku z danymi", "Error", JOptionPane.ERROR_MESSAGE);
+        }
+
+        return root;
+    }
+
+    private Shape3D createColoredTeapot() {
+        int tessellation = 20;
+        int numVertices = (tessellation + 1) * (tessellation + 1) * patches.size();
+        int numTriangles = tessellation * tessellation * 2 * patches.size();
+
+        IndexedTriangleArray geometry = new IndexedTriangleArray(
+                numVertices,
+                GeometryArray.COORDINATES | GeometryArray.NORMALS,
+                numTriangles * 3
+        );
+
+        int vertexIndex = 0;
+        int triangleIndex = 0;
+
+        for (float[] patch : patches) {
+            float step = 1.0f / tessellation;
+
+            for (int i = 0; i <= tessellation; i++) {
+                float u = i * step;
+                for (int j = 0; j <= tessellation; j++) {
+                    float v = j * step;
+                    float[] point = evaluateBezier(patch, u, v);
+                    geometry.setCoordinate(vertexIndex, point);
+                    Vector3f normal = calculateNormal(patch, u, v);
+                    geometry.setNormal(vertexIndex, normal);
+
+                    vertexIndex++;
+                }
+            }
+            int patchStart = vertexIndex - (tessellation + 1) * (tessellation + 1);
+            for (int i = 0; i < tessellation; i++) {
+                for (int j = 0; j < tessellation; j++) {
+                    int topLeft = patchStart + i * (tessellation + 1) + j;
+                    int topRight = topLeft + 1;
+                    int bottomLeft = topLeft + tessellation + 1;
+                    int bottomRight = bottomLeft + 1;
+
+                    geometry.setCoordinateIndex(triangleIndex++, topLeft);
+                    geometry.setCoordinateIndex(triangleIndex++, bottomLeft);
+                    geometry.setCoordinateIndex(triangleIndex++, bottomRight);
+
+                    geometry.setCoordinateIndex(triangleIndex++, topLeft);
+                    geometry.setCoordinateIndex(triangleIndex++, bottomRight);
+                    geometry.setCoordinateIndex(triangleIndex++, topRight);
+                }
+            }
+        }
+        Appearance appearance = new Appearance();
+        Material material = new Material();
+        material.setDiffuseColor(new Color3f(0.8f, 0.3f, 0.2f));
+        material.setAmbientColor(new Color3f(0.4f, 0.2f, 0.1f));
+        material.setSpecularColor(new Color3f(1.0f, 1.0f, 1.0f));
+        material.setShininess(64.0f);
+        appearance.setMaterial(material);
+
+        return new Shape3D(geometry, appearance);
+    }
+
+    private Vector3f calculateNormal(float[] patch, float u, float v) {
+        float[] du = new float[3];
+        float[] dv = new float[3];
+
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 4; j++) {
+                float basisU = bernsteinBasisDerivative(i, 3, u);
+                float basisV = bernsteinBasis(j, 3, v);
+
+                int index = (i * 4 + j) * 3;
+                du[0] += patch[index] * basisU * basisV;
+                du[1] += patch[index + 1] * basisU * basisV;
+                du[2] += patch[index + 2] * basisU * basisV;
+
+                basisU = bernsteinBasis(i, 3, u);
+                basisV = bernsteinBasisDerivative(j, 3, v);
+
+                dv[0] += patch[index] * basisU * basisV;
+                dv[1] += patch[index + 1] * basisU * basisV;
+                dv[2] += patch[index + 2] * basisU * basisV;
+            }
+        }
+
+        Vector3f normal = new Vector3f();
+        normal.x = du[1] * dv[2] - du[2] * dv[1];
+        normal.y = du[2] * dv[0] - du[0] * dv[2];
+        normal.z = du[0] * dv[1] - du[1] * dv[0];
+        normal.normalize();
+
+        return normal;
+    }
+
+    private float bernsteinBasisDerivative(int i, int n, float t) {
+        if (t == 0 || t == 1) return 0;
+        return binomialCoefficient(n, i) *
+                (i * (float)Math.pow(t, i-1) * (float)Math.pow(1-t, n-i) -
+                        (n-i) * (float)Math.pow(t, i) * (float)Math.pow(1-t, n-i-1));
+    }
+
+    private void setupMouseBehaviors(TransformGroup tg) {
+        MouseRotate mouseRotate = new MouseRotate();
+        mouseRotate.setTransformGroup(tg);
+        mouseRotate.setSchedulingBounds(new BoundingSphere(new Point3d(0.0, 0.0, 0.0), 1000.0));
+        mouseRotate.setFactor(0.005);
+        tg.addChild(mouseRotate);
+
+        MouseZoom mouseZoom = new MouseZoom();
+        mouseZoom.setTransformGroup(tg);
+        mouseZoom.setSchedulingBounds(new BoundingSphere(new Point3d(0.0, 0.0, 0.0), 1000.0));
+        tg.addChild(mouseZoom);
+
+        MouseTranslate mouseTranslate = new MouseTranslate();
+        mouseTranslate.setTransformGroup(tg);
+        mouseTranslate.setSchedulingBounds(new BoundingSphere(new Point3d(0.0, 0.0, 0.0), 1000.0));
+        tg.addChild(mouseTranslate);
+    }
+
+    private Node createEnhancedLighting() {
+        BranchGroup lightGroup = new BranchGroup();
+
+        DirectionalLight directionalLight = new DirectionalLight();
+        directionalLight.setColor(new Color3f(0.9f, 0.9f, 0.9f));
+        directionalLight.setDirection(new Vector3f(-1f, -1f, -1f));
+        directionalLight.setInfluencingBounds(new BoundingSphere(new Point3d(0.0, 0.0, 0.0), 1000.0));
+        lightGroup.addChild(directionalLight);
+
+        PointLight pointLight = new PointLight(
+                new Color3f(0.6f, 0.6f, 0.8f),
+                new Point3f(3f, 3f, 3f),
+                new Point3f(1f, 0f, 0f)
+        );
+        pointLight.setInfluencingBounds(new BoundingSphere(new Point3d(0.0, 0.0, 0.0), 1000.0));
+        lightGroup.addChild(pointLight);
+
+        AmbientLight ambientLight = new AmbientLight(new Color3f(0.3f, 0.3f, 0.3f));
+        ambientLight.setInfluencingBounds(new BoundingSphere(new Point3d(0.0, 0.0, 0.0), 1000.0));
+        lightGroup.addChild(ambientLight);
+
+        return lightGroup;
+    }
+
 }
+
 
 public class MainPanel extends JPanel {
     DrawingPanel dp;
